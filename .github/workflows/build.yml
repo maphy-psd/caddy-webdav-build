@@ -91,7 +91,7 @@ jobs:
           file: ./Dockerfile
           push: true
           build-args: |
-            CADDY_VERSION=${{ steps.caddy_version.outputs.tag }}
+            CADDY_VERSION=${{ steps.caddy_version.outputs.version }}
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.caddy_version.outputs.version }}
