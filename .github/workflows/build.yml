@@ -1,0 +1,111 @@
+name: Build and publish Caddy WebDAV image
+
+on:
+  # Manuell auslösbar
+  workflow_dispatch:
+
+  # Optional: regelmäßig prüfen, z.B. täglich um 03:00
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      IMAGE_NAME: caddy-webdav
+      REGISTRY: ghcr.io
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      # 1) Neueste Caddy-Version automatisch von GitHub holen
+      - name: Determine Caddy version
+        id: caddy_version
+        run: |
+          API_URL="https://api.github.com/repos/caddyserver/caddy/releases/latest"
+
+          TAG=$(curl -s "${API_URL}" | jq -r '.tag_name')
+
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "Konnte Caddy-Version nicht ermitteln."
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+
+          echo "Gefundene Caddy-Version: TAG=${TAG}, VERSION=${VERSION}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # 2) Prüfen, ob es das Image-Tag in GHCR schon gibt
+      - name: Check if image for this version already exists
+        id: image_exists
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="${OWNER_LOWER}/${{ env.IMAGE_NAME }}"
+          VERSION="${{ steps.caddy_version.outputs.version }}"
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+          echo "Prüfe, ob Tag '${VERSION}' bereits existiert für ${IMAGE}..."
+
+          # Tags von GHCR holen
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
+            "https://${{ env.REGISTRY }}/v2/${IMAGE}/tags/list")
+
+          # Wenn das Repo / Package noch nicht existiert (erster Build),
+          # ist RESPONSE oft leer oder enthält keine .tags
+          if ! echo "$RESPONSE" | jq -e '.tags' >/dev/null 2>&1; then
+            echo "Noch keine Tags gefunden (vermutlich erster Build)."
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$RESPONSE" | jq -e --arg ver "$VERSION" '.tags[] | select(. == $ver)' >/dev/null 2>&1; then
+            echo "Image-Tag '${VERSION}' existiert bereits – Build wird übersprungen."
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image-Tag '${VERSION}' existiert noch nicht – Build wird ausgeführt."
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 3) Build + Push nur, wenn skip_build != true
+      - name: Build and push Docker image
+        if: steps.image_exists.outputs.skip_build != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            # Für xcaddy: Tag inkl. "v", z.B. "v2.8.4"
+            CADDY_VERSION=${{ steps.caddy_version.outputs.tag }}
+          tags: |
+            # "latest" zeigt immer auf die zuletzt gebaute Version
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/$IMAGE_NAME:latest
+            # Version ohne "v", z.B. ":2.8.4"
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/$IMAGE_NAME:${{ steps.caddy_version.outputs.version }}
