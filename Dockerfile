@@ -1,13 +1,14 @@
-# Stage 1: Build Caddy mit WebDAV-Plugin
-FROM golang:1.23-alpine AS builder
+# syntax=docker/dockerfile:1
 
-RUN apk add --no-cache git ca-certificates
-RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+ARG CADDY_VERSION=2.8.4
 
-WORKDIR /build
+FROM caddy:${CADDY_VERSION}-builder AS builder
+RUN xcaddy build --with github.com/mholt/caddy-webdav@latest
 
-ARG CADDY_VERSION=latest
+FROM caddy:${CADDY_VERSION}-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
-RUN echo "Building Caddy version: ${CADDY_VERSION}" && \
-    xcaddy build "${CADDY_VERSION}" \
-      --with github.com/mholt/caddy-webdav@latest
+VOLUME ["/data", "/config"]
+EXPOSE 80 443
+
+ENTRYPOINT ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
