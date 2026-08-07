@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1
 
-ARG CADDY_VERSION=2.8.4
+ARG CADDY_VERSION
+ARG WEBDAV_VERSION
 
 FROM caddy:${CADDY_VERSION}-builder AS builder
-RUN xcaddy build --with github.com/mholt/caddy-webdav@latest
+
+ARG WEBDAV_VERSION
+RUN xcaddy build --with github.com/mholt/caddy-webdav@${WEBDAV_VERSION}
 
 FROM caddy:${CADDY_VERSION}-alpine
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
