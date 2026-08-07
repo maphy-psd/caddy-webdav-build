@@ -21,9 +21,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -34,52 +31,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install jq
+      - name: Determine Caddy and WebDAV versions
+        id: versions
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+          set -euo pipefail
 
-      - name: Determine Caddy version
-        id: caddy_version
-        run: |
-          API_URL="https://api.github.com/repos/caddyserver/caddy/releases/latest"
-          TAG=$(curl -s "${API_URL}" | jq -r '.tag_name')
+          CADDY_TAG=$(
+            git ls-remote --tags --refs https://github.com/caddyserver/caddy.git               | awk '{sub("refs/tags/", "", $2); print $2}'               | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'               | sort -V               | tail -n 1
+          )
 
-          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "Konnte Caddy-Version nicht ermitteln."
+          if [ -z "$CADDY_TAG" ]; then
+            echo "Konnte aktuelle stabile Caddy-Version nicht ermitteln."
             exit 1
           fi
 
-          VERSION="${TAG#v}"
-          echo "TAG=${TAG} VERSION=${VERSION}"
+          CADDY_VERSION="${CADDY_TAG#v}"
 
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          WEBDAV_VERSION=$(
+            git ls-remote https://github.com/mholt/caddy-webdav.git HEAD               | awk 'NR == 1 {print $1}'
+          )
 
-      - name: Check if image for this version already exists
-        id: image_exists
-        run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE="${OWNER_LOWER}/${{ env.IMAGE_NAME }}"
-          VERSION="${{ steps.caddy_version.outputs.version }}"
-          TOKEN="${{ secrets.GITHUB_TOKEN }}"
-
-          echo "Prüfe GHCR Tag '${VERSION}' für ${IMAGE}..."
-
-          RESPONSE=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
-            "https://${{ env.REGISTRY }}/v2/${IMAGE}/tags/list")
-
-          if ! echo "$RESPONSE" | jq -e '.tags' >/dev/null 2>&1; then
-            echo "Noch keine Tags gefunden (vermutlich erster Build)."
-            echo "skip_build=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          if ! [[ "$WEBDAV_VERSION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Konnte aktuellen caddy-webdav-Commit nicht ermitteln."
+            exit 1
           fi
 
-          if echo "$RESPONSE" | jq -e --arg ver "$VERSION" '.tags[] | select(. == $ver)' >/dev/null 2>&1; then
-            echo "Tag existiert bereits -> überspringe Build."
+          WEBDAV_SHORT="${WEBDAV_VERSION:0:12}"
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="${{ env.REGISTRY }}/${OWNER_LOWER}/${{ env.IMAGE_NAME }}"
+          IMAGE_TAG="${CADDY_VERSION}-webdav-${WEBDAV_SHORT}"
+
+          echo "Caddy:          ${CADDY_VERSION}"
+          echo "caddy-webdav:   ${WEBDAV_VERSION}"
+          echo "Image:          ${IMAGE}:${IMAGE_TAG}"
+
+          echo "caddy_version=${CADDY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "webdav_version=${WEBDAV_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "webdav_short=${WEBDAV_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if image already exists
+        id: image_exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE="${{ steps.versions.outputs.image }}"
+          IMAGE_TAG="${{ steps.versions.outputs.image_tag }}"
+
+          echo "Prüfe ${IMAGE}:${IMAGE_TAG} ..."
+
+          if docker buildx imagetools inspect "${IMAGE}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "Image existiert bereits -> überspringe Build."
             echo "skip_build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Tag existiert nicht -> baue."
+            echo "Image existiert noch nicht -> baue."
             echo "skip_build=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -91,7 +99,13 @@ jobs:
           file: ./Dockerfile
           push: true
           build-args: |
-            CADDY_VERSION=${{ steps.caddy_version.outputs.version }}
+            CADDY_VERSION=${{ steps.versions.outputs.caddy_version }}
+            WEBDAV_VERSION=${{ steps.versions.outputs.webdav_version }}
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.caddy_version.outputs.version }}
+            ${{ steps.versions.outputs.image }}:latest
+            ${{ steps.versions.outputs.image }}:${{ steps.versions.outputs.image_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.versions.outputs.image_tag }}
+            org.opencontainers.image.description=Caddy with mholt/caddy-webdav
+            
